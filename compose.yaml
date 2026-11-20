@@ -1,0 +1,82 @@
+name: semskip
+
+x-minio: &minio
+  build: ./docker/minio
+  image: semskip/minio:local
+  pull_policy: build
+  environment:
+    MINIO_ROOT_USER: "${SEMSKIP_S3_USER:?Run scripts/up.sh}"
+    MINIO_ROOT_PASSWORD: "${SEMSKIP_S3_PASSWORD:?Run scripts/up.sh}"
+
+services:
+  minio:
+    <<: *minio
+    command: ["minio", "server", "/data"]
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    <<: *minio
+    depends_on: [minio]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until mc alias set store http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+          sleep 2
+        done
+        mc mb --ignore-existing store/warehouse
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: iceberg_catalog
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: "${SEMSKIP_DB_PASSWORD:?Run scripts/up.sh}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iceberg -d iceberg_catalog"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  trino:
+    image: trinodb/trino:483
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:28080:8080"
+    environment:
+      SEMSKIP_DB_PASSWORD: "${SEMSKIP_DB_PASSWORD:?Run scripts/up.sh}"
+      SEMSKIP_S3_USER: "${SEMSKIP_S3_USER:?Run scripts/up.sh}"
+      SEMSKIP_S3_PASSWORD: "${SEMSKIP_S3_PASSWORD:?Run scripts/up.sh}"
+    volumes:
+      - ./docker/trino/iceberg.properties:/etc/trino/catalog/iceberg.properties:ro
+      - ./.data/jars/postgresql-42.7.4.jar:/usr/lib/trino/plugin/iceberg/postgresql.jar:ro
+
+  spark:
+    image: apache/spark:3.5.5-java17
+    command: ["sleep", "infinity"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      SEMSKIP_DB_PASSWORD: "${SEMSKIP_DB_PASSWORD:?Run scripts/up.sh}"
+      AWS_ACCESS_KEY_ID: "${SEMSKIP_S3_USER:?Run scripts/up.sh}"
+      AWS_SECRET_ACCESS_KEY: "${SEMSKIP_S3_PASSWORD:?Run scripts/up.sh}"
+      AWS_REGION: us-east-1
+    volumes:
+      - ./docker/spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./.data/jars/postgresql-42.7.4.jar:/opt/spark/jars/postgresql.jar:ro
+      - ./.data/jars/iceberg-spark-runtime-3.5_2.12-1.11.0.jar:/opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.11.0.jar:ro
+      - ./.data/jars/iceberg-aws-bundle-1.11.0.jar:/opt/spark/jars/iceberg-aws-bundle-1.11.0.jar:ro
+
+volumes:
+  minio-data:
+  postgres-data:
