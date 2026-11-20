@@ -1,0 +1,13 @@
+.env
+.data/
+data/
+datasets/
+results/
+*.parquet
+*.csv
+*.jar
+*.zip
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
